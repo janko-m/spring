@@ -178,56 +178,13 @@ class AppTest < ActiveSupport::TestCase
     File.write(@controller, @controller_contents)
   end
 
-  test "basic" do
-    assert_speedup do
-      2.times { app_run spring_test_command }
-    end
-  end
-
-  test "help message when called without arguments" do
-    assert_success spring, stdout: 'Usage: spring COMMAND [ARGS]'
-  end
-
-  test "test changes are picked up" do
-    assert_speedup do
-      assert_success spring_test_command, stdout: "0 failures"
-
-      File.write(@test, @test_contents.sub("get :index", "raise 'omg'"))
-      assert_failure spring_test_command, stdout: "RuntimeError: omg"
-    end
-  end
-
-  test "code changes are picked up" do
-    assert_speedup do
-      assert_success spring_test_command, stdout: "0 failures"
-
-      File.write(@controller, @controller_contents.sub("@posts = Post.all", "raise 'omg'"))
-      assert_failure spring_test_command, stdout: "RuntimeError: omg"
-    end
-  end
-
-  test "code changes in pre-referenced app files are picked up" do
-    begin
-      initializer = "#{app_root}/config/initializers/load_posts_controller.rb"
-      File.write(initializer, "PostsController\n")
-
-      assert_speedup do
-        assert_success spring_test_command, stdout: "0 failures"
-
-        File.write(@controller, @controller_contents.sub("@posts = Post.all", "raise 'omg'"))
-        assert_failure spring_test_command, stdout: "RuntimeError: omg"
-      end
-    ensure
-      FileUtils.rm_f(initializer)
-    end
-  end
-
   def assert_app_reloaded
     application = "#{app_root}/config/application.rb"
     application_contents = File.read(application)
 
     assert_success spring_test_command
 
+    File.write(@test, @test_contents.sub("get :index", "Foo.omg"))
     File.write(application, application_contents + <<-CODE)
       class Foo
         def self.omg
@@ -235,7 +192,6 @@ class AppTest < ActiveSupport::TestCase
         end
       end
     CODE
-    File.write(@test, @test_contents.sub("get :index", "Foo.omg"))
 
     await_reload
 
@@ -246,139 +202,26 @@ class AppTest < ActiveSupport::TestCase
     File.write(application, application_contents)
   end
 
-  test "app gets reloaded when preloaded files change (polling watcher)" do
-    assert_success "#{spring} rails runner 'puts Spring.watcher.class'", stdout: "Polling"
-    assert_app_reloaded
-  end
+  10.times do |i|
+    test "app gets reloaded when preloaded files change (listen watcher) #{i}" do
+      begin
+        gemfile = app_root.join("Gemfile")
+        gemfile_contents = gemfile.read
+        File.write(gemfile, gemfile_contents.sub(%{# gem 'listen'}, %{gem 'listen'}))
 
-  test "app gets reloaded when preloaded files change (listen watcher)" do
-    begin
-      gemfile = app_root.join("Gemfile")
-      gemfile_contents = gemfile.read
-      File.write(gemfile, gemfile_contents.sub(%{# gem 'listen'}, %{gem 'listen'}))
+        config_path = "#{app_root}/config/spring.rb"
+        config_contents = File.read(config_path)
+        File.write(config_path,config_contents + "\nSpring.watch_method = :listen")
 
-      config_path = "#{app_root}/config/spring.rb"
-      config_contents = File.read(config_path)
-      File.write(config_path,config_contents + "\nSpring.watch_method = :listen")
+        app_run "bundle install", timeout: nil
 
-      app_run "bundle install", timeout: nil
-
-      assert_success "#{spring} rails runner 'puts Spring.watcher.class'", stdout: "Listen"
-      assert_app_reloaded
-    ensure
-      File.write(config_path,config_contents)
-      File.write(gemfile, gemfile_contents)
-      assert_success "bundle check"
-    end
-  end
-
-  test "app recovers when a boot-level error is introduced" do
-    begin
-      application = "#{app_root}/config/application.rb"
-      application_contents = File.read(application)
-
-      assert_success spring_test_command
-
-      File.write(application, application_contents + "\nomg")
-      await_reload
-
-      assert_failure spring_test_command
-
-      File.write(application, application_contents)
-      await_reload
-
-      assert_success spring_test_command
-    ensure
-      File.write(application, application_contents)
-    end
-  end
-
-  test "stop command kills server" do
-    app_run spring_test_command
-    assert spring_env.server_running?, "The server should be running but it isn't"
-
-    assert_success "#{spring} stop"
-    assert !spring_env.server_running?, "The server should not be running but it is"
-  end
-
-  test "custom commands" do
-    assert_success "#{spring} custom", stdout: "omg"
-  end
-
-  test "binstubs" do
-    app_run "#{spring} binstub rake"
-    app_run "#{spring} binstub rails"
-    assert_success "bin/spring help"
-    assert_success "bin/rake -T", stdout: "rake db:migrate"
-    assert_success "bin/rails runner 'puts %(omg)'", stdout: "omg"
-  end
-
-  test "after fork callback" do
-    begin
-      config_path = "#{app_root}/config/spring.rb"
-      config_contents = File.read(config_path)
-
-      File.write(config_path, config_contents + "\nSpring.after_fork { puts '!callback!' }")
-      assert_success "#{spring} rails runner 'puts 2'", stdout: "!callback!\n2"
-    ensure
-      File.write(config_path, config_contents)
-    end
-  end
-
-  test "missing config/application.rb" do
-    begin
-      FileUtils.mv app_root.join("config/application.rb"), app_root.join("config/application.rb.bak")
-
-      assert_output(
-        app_run("#{spring} rake -T"),
-        tty: "unable to find your config/application.rb"
-      )
-    ensure
-      FileUtils.mv app_root.join("config/application.rb.bak"), app_root.join("config/application.rb")
-    end
-  end
-
-  test "piping" do
-    assert_success "#{spring} rake -T | grep db", stdout: "rake db:migrate"
-  end
-
-  test "status" do
-    assert_success "#{spring} status", stdout: "Spring is not running"
-    app_run "#{spring} rails runner ''"
-    assert_success "#{spring} status", stdout: "Spring is running"
-  end
-
-  test "runner command sets Rails environment from command-line options" do
-    assert_success "#{spring} rails runner -e production 'puts Rails.env'", stdout: "production"
-    assert_success "#{spring} rails runner --environment=production 'puts Rails.env'", stdout: "production"
-  end
-
-  test "forcing rails env via environment variable" do
-    env['RAILS_ENV'] = 'production'
-    assert_success "#{spring} rake -p 'Rails.env'", stdout: "production"
-  end
-
-  test "exit code for failing specs" do
-    assert_success "#{spring} rspec"
-    File.write(@spec, @spec_contents.sub("true.should be_true", "false.should be_true"))
-    assert_failure "#{spring} rspec"
-  end
-
-  test "changing the Gemfile restarts the server" do
-    begin
-      gemfile = app_root.join("Gemfile")
-      gemfile_contents = gemfile.read
-
-      assert_success %(#{spring} rails runner 'require "rspec"')
-
-      File.write(gemfile, gemfile_contents.sub(%{gem 'rspec'}, %{# gem 'rspec'}))
-      app_run "bundle check"
-
-      await_reload
-      assert_failure %(#{spring} rails runner 'require "rspec"'), stderr: "cannot load such file -- rspec"
-    ensure
-      File.write(gemfile, gemfile_contents)
-      assert_success "bundle check"
+        assert_success "#{spring} rails runner 'puts Spring.watcher.class'", stdout: "Listen"
+        assert_app_reloaded
+      ensure
+        File.write(config_path,config_contents)
+        File.write(gemfile, gemfile_contents)
+        assert_success "bundle check"
+      end
     end
   end
 end

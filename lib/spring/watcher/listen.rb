@@ -34,8 +34,11 @@ module Spring
       end
 
       def changed(modified, added, removed)
+        puts "changed:"
+        p [modified, added, removed]
         synchronize do
           if (modified + added + removed).any? { |f| watching? f }
+            puts "marking stale"
             mark_stale
           end
         end
